@@ -1,0 +1,136 @@
+// =====================================================================
+// Smart Meter Consumption Reporting - Power BI calculated columns and measures
+// Step 6b. Paste each block into Power BI as a calculated column or a new measure.
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// CALCULATED COLUMNS on DimProperty  (Table tools > New column)
+// ---------------------------------------------------------------------
+
+// Number of complete days (22-26 hours of clean data) for this property.
+// CALCULATE turns the current row into a filter (context transition),
+// so FactDaily is filtered to this property through the relationship.
+Complete Days =
+CALCULATE (
+    COUNTROWS ( FactDaily ),
+    FactDaily[is_complete_day] = TRUE ()
+)
+
+// A property is used for consumption figures only if it has at least
+// 30 complete days and at least half its intervals passed the quality
+// rules. This keeps out short histories and faulty meters (e.g. VAL-243,
+// 4% clean, which otherwise averages 22,749 L/day and distorts every
+// garden, pool and irrigation figure).
+Is Reportable =
+DimProperty[Complete Days] >= 30
+    && DimProperty[clean_interval_pct] >= 50
+
+
+// ---------------------------------------------------------------------
+// MEASURES  (select _Measures, then Home > New measure)
+// ---------------------------------------------------------------------
+
+// ---- Volume ----------------------------------------------------------
+
+Total Litres =
+SUM ( FactDaily[litres] )
+
+
+// ---- Q1: consumption per property ------------------------------------
+
+// Average of each reportable property's mean daily use on complete days.
+// Property-weighted: every property counts once, however long its history.
+Avg Daily Litres per Property =
+VAR PropertyAverages =
+    ADDCOLUMNS (
+        CALCULATETABLE ( VALUES ( DimProperty[meter_id] ), DimProperty[Is Reportable] = TRUE () ),
+        "@AvgDay", CALCULATE ( AVERAGE ( FactDaily[litres] ), FactDaily[is_complete_day] = TRUE () )
+    )
+RETURN
+    AVERAGEX ( FILTER ( PropertyAverages, NOT ISBLANK ( [@AvgDay] ) ), [@AvgDay] )
+
+// Same, but the median property. Robust to a few very heavy users.
+Median Daily Litres per Property =
+VAR PropertyAverages =
+    ADDCOLUMNS (
+        CALCULATETABLE ( VALUES ( DimProperty[meter_id] ), DimProperty[Is Reportable] = TRUE () ),
+        "@AvgDay", CALCULATE ( AVERAGE ( FactDaily[litres] ), FactDaily[is_complete_day] = TRUE () )
+    )
+RETURN
+    MEDIANX ( FILTER ( PropertyAverages, NOT ISBLANK ( [@AvgDay] ) ), [@AvgDay] )
+
+// How many properties sit behind the two figures above. Show it next
+// to every average, especially on the water efficiency page.
+Properties Reported =
+VAR PropertyAverages =
+    ADDCOLUMNS (
+        CALCULATETABLE ( VALUES ( DimProperty[meter_id] ), DimProperty[Is Reportable] = TRUE () ),
+        "@AvgDay", CALCULATE ( AVERAGE ( FactDaily[litres] ), FactDaily[is_complete_day] = TRUE () )
+    )
+RETURN
+    COUNTROWS ( FILTER ( PropertyAverages, NOT ISBLANK ( [@AvgDay] ) ) )
+
+// Summer (Jun-Aug) against the winter baseline (Dec-Feb).
+Summer Uplift % =
+VAR Summer = CALCULATE ( [Avg Daily Litres per Property], DimDate[season] = "Summer" )
+VAR Winter = CALCULATE ( [Avg Daily Litres per Property], DimDate[season] = "Winter" )
+RETURN
+    DIVIDE ( Summer - Winter, Winter )
+
+
+// ---- Q2: demand profile ----------------------------------------------
+
+Avg Litres per Property-Hour =
+AVERAGE ( FactHourly[litres] )
+
+// Builds the 24-hour profile, then returns the busiest hour.
+// ALL ( DimHour[hour] ) removes any hour filter so all 24 hours are compared.
+Peak Hour =
+VAR Profile =
+    ADDCOLUMNS ( ALL ( DimHour[hour] ), "@Litres", [Avg Litres per Property-Hour] )
+VAR Busiest =
+    TOPN ( 1, Profile, [@Litres], DESC )
+RETURN
+    FORMAT ( MAXX ( Busiest, DimHour[hour] ), "00" ) & ":00"
+
+// Busiest hour divided by the average hour. 1.0 = perfectly flat demand.
+Peak to Average Ratio =
+VAR Profile =
+    ADDCOLUMNS ( ALL ( DimHour[hour] ), "@Litres", [Avg Litres per Property-Hour] )
+RETURN
+    DIVIDE ( MAXX ( Profile, [@Litres] ), AVERAGEX ( Profile, [@Litres] ) )
+
+
+// ---- Q3: continuous flow ---------------------------------------------
+
+// Share of water used 02:00-04:00, on days with 23+ hours recorded.
+// A completely flat 24-hour flow would give 2/24 = 8.3%.
+Night Use Share % =
+VAR NightLitres =
+    CALCULATE ( SUM ( FactDaily[night_litres] ), FactDaily[hours_recorded] >= 23 )
+VAR DayLitres =
+    CALCULATE ( SUM ( FactDaily[litres] ), FactDaily[hours_recorded] >= 23 )
+RETURN
+    DIVIDE ( NightLitres, DayLitres )
+
+Properties with Continuous Flow =
+CALCULATE ( COUNTROWS ( DimProperty ), DimProperty[continuous_flow_status] = "Persistent" )
+
+Properties Flagged for Review =
+CALCULATE (
+    COUNTROWS ( DimProperty ),
+    DimProperty[continuous_flow_status] IN { "Persistent", "Intermittent" }
+)
+
+
+// ---- Q5: data quality ------------------------------------------------
+
+Read Completeness % =
+DIVIDE ( AVERAGE ( DimProperty[read_completeness_pct] ), 100 )
+
+Properties Below 90% Completeness =
+CALCULATE ( COUNTROWS ( DimProperty ), DimProperty[below_90pct_completeness] = TRUE () )
+
+Total DQ Flags =
+SUM ( FactDQFlags[flag_count] )

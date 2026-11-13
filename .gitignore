@@ -1,0 +1,10 @@
+# Raw SmartH2O data: too large for GitHub (Tegna file 198 MB) and redistributed only under the dataset licence
+data/raw/
+
+# Office lock and temp files
+~$*
+*.tmp
+
+# OS files
+Thumbs.db
+.DS_Store
